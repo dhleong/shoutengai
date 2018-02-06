@@ -20,6 +20,7 @@ allprojects {
     repositories {
         google()
         jcenter()
+        mavenCentral()
     }
 }
 
@@ -38,5 +39,11 @@ ext.deps = [
 
     rx: [
         java: "io.reactivex.rxjava2:rxjava:${vs.rx.java}",
+    ],
+
+    test: [
+            junit: 'junit:junit:4.12',
+            assertk: "com.willowtreeapps.assertk:assertk:0.9",
+            mockito: "com.nhaarman:mockito-kotlin:1.5.0"
     ],
 ]

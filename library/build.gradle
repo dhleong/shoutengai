@@ -26,6 +26,9 @@ android {
         }
     }
 
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -34,10 +37,10 @@ dependencies {
     api deps.billing
     implementation deps.rx.java
 
-    testImplementation 'junit:junit:4.12'
+    testImplementation deps.test.junit
+    testImplementation deps.test.assertk
+    testImplementation deps.test.mockito
     androidTestImplementation 'com.android.support.test:runner:1.0.1'
     androidTestImplementation 'com.android.support.test.espresso:espresso-core:3.0.1'
 }
-repositories {
-    mavenCentral()
-}
+

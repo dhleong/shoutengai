@@ -19,14 +19,34 @@ import io.reactivex.schedulers.Schedulers
 import net.dhleong.shoutengai.exc.BillingException
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
+ * This class is the primary entry point to the Reactive Billing Library.
+ *  You may pass any valid context; it will hold a strong reference to
+ *  the Application context, not necessarily the one passed in.
+ *
+ * You should reuse a single instance as much as possible for proper behavior.
+ *
  * @author dhleong
  */
-class Shoutengai @UiThread constructor(
-    context: Context,
-    private val base64EncodedPublicKey: String
+class Shoutengai internal constructor(
+    private val base64EncodedPublicKey: String,
+    clientFactory: (PurchasesUpdatedListener) -> BillingClient
 ) {
+
+    /**
+     * Default public constructor
+     */
+    @UiThread
+    constructor(
+        context: Context,
+        base64EncodedPublicKey: String
+    ) : this(base64EncodedPublicKey, { listener ->
+        BillingClient.newBuilder(context)
+            .setListener(listener)
+            .build()
+    })
 
     private val purchaseUpdates: ReplayProcessor<PurchaseResult> =
         ReplayProcessor.createWithTimeAndSize(
@@ -43,26 +63,36 @@ class Shoutengai @UiThread constructor(
         }
 
     private val client: Single<BillingClient> =
-        BillingClient.newBuilder(context)
-            .setListener(purchasesListener)
-            .build()
-            .let { client -> Single.create<BillingClient> { emitter ->
-                client.startConnection(object : BillingClientStateListener {
-                    override fun onBillingServiceDisconnected() {
-                        // Try to restart the connection on the next request to
-                        // Google Play by calling the startConnection() method.
-                    }
+        clientFactory(purchasesListener).let { client ->
+            val isConnected = AtomicBoolean(false)
 
-                    override fun onBillingSetupFinished(responseCode: Int) {
-                        if (responseCode == BillingClient.BillingResponse.OK) {
-                            emitter.onSuccess(client)
-                        } else {
-                            emitter.onError(BillingException(responseCode))
+            Single.defer {
+                if (isConnected.get()) Single.just(client)
+                else Single.create<BillingClient> { emitter ->
+                    // eagerly set "true" so we don't try to connect
+                    //  multiple times for rapid requests
+                    isConnected.set(true)
+
+                    // start connect
+                    client.startConnection(object : BillingClientStateListener {
+                        override fun onBillingServiceDisconnected() {
+                            // Try to restart the connection on the next request to
+                            // Google Play by calling the startConnection() method.
+                            isConnected.set(false)
                         }
-                    }
 
-                })
-            }.cache() }
+                        override fun onBillingSetupFinished(responseCode: Int) {
+                            if (responseCode == BillingClient.BillingResponse.OK) {
+                                emitter.onSuccess(client)
+                            } else {
+                                emitter.onError(BillingException(responseCode))
+                            }
+                        }
+
+                    })
+                }
+            }
+        }
 
     /**
      * A Flowable of all [PurchaseResult]s provided to us by Google Play,
@@ -74,19 +104,32 @@ class Shoutengai @UiThread constructor(
      * Reactive version of [BillingClient.launchBillingFlow] that emits the
      *  the result.
      */
-    fun launchBillingFlow(activity: Activity, params: BillingFlowParams): Single<PurchaseResult> =
-        client.flatMap { client ->
-            val lastValue = purchaseUpdates.value
-            val result = client.launchBillingFlow(activity, params)
-            if (result != BillingClient.BillingResponse.OK) {
-                Single.error(BillingException(result))
-            } else {
-                purchaseUpdates
-                    .filter { it !== lastValue }
-                    .take(1)
-                    .singleOrError()
-            }
+    fun launchBillingFlow(
+        activity: Activity,
+        params: BillingFlowParams
+    ): Single<PurchaseResult> = client.flatMap { client ->
+        val lastValue = purchaseUpdates.value
+        val result = client.launchBillingFlow(activity, params)
+        if (result != BillingClient.BillingResponse.OK) {
+            Single.error(BillingException(result))
+        } else {
+            purchaseUpdates
+                .filter {
+                    // since purchaseUpdates is a ReplayProcessor,
+                    //  when we first subscribe it could be an old
+                    //  value so we want to ignore that.
+                    // Otherwise, we only want *verified* purchase
+                    //  updates that contain the sku we requested.
+                    it !== lastValue && it.purchases.asSequence()
+                        .filter(this::verifyPurchase)
+                        .any {
+                            it.sku == params.sku
+                        }
+                }
+                .take(1)
+                .singleOrError()
         }
+    }
 
     /**
      * Reactive version of [BillingClient.queryPurchases] that uses cached data
@@ -134,9 +177,14 @@ class Shoutengai @UiThread constructor(
     //  in production apps. May not be worth it
     @Suppress("NOTHING_TO_INLINE")
     private inline fun verifyPurchase(purchase: Purchase): Boolean = try {
-        val signedData = purchase.originalJson
-        val signature = purchase.signature
-        BillingSecurity.verifyPurchase(base64EncodedPublicKey, signedData, signature)
+        if (BuildConfig.DEBUG && purchase.sku == "android.test.purchase") {
+            // this branch should get compiled out in a release build
+            true
+        } else {
+            val signedData = purchase.originalJson
+            val signature = purchase.signature
+            BillingSecurity.verifyPurchase(base64EncodedPublicKey, signedData, signature)
+        }
     } catch (e: IOException) {
         Log.e(TAG, "Got an exception trying to validate a purchase: " + e)
         false
