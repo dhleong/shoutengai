@@ -1,11 +1,13 @@
 package net.dhleong.shoutengai
 
+import android.app.Activity
 import android.content.ContentValues.TAG
 import android.content.Context
 import android.support.annotation.UiThread
 import android.util.Log
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingClientStateListener
+import com.android.billingclient.api.BillingFlowParams
 import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.PurchasesUpdatedListener
 import io.reactivex.BackpressureStrategy
@@ -14,7 +16,7 @@ import io.reactivex.FlowableEmitter
 import io.reactivex.Single
 import io.reactivex.processors.ReplayProcessor
 import io.reactivex.schedulers.Schedulers
-import net.dhleong.shoutengai.exc.BillingUnavailableException
+import net.dhleong.shoutengai.exc.BillingException
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -27,7 +29,10 @@ class Shoutengai @UiThread constructor(
 ) {
 
     private val purchaseUpdates: ReplayProcessor<PurchaseResult> =
-        ReplayProcessor.createWithTime(1, TimeUnit.SECONDS, Schedulers.io())
+        ReplayProcessor.createWithTimeAndSize(
+            1, TimeUnit.SECONDS, Schedulers.io(),
+            1
+        )
 
     private val purchasesListener: PurchasesUpdatedListener =
         PurchasesUpdatedListener { responseCode, purchases ->
@@ -52,12 +57,36 @@ class Shoutengai @UiThread constructor(
                         if (responseCode == BillingClient.BillingResponse.OK) {
                             emitter.onSuccess(client)
                         } else {
-                            emitter.onError(BillingUnavailableException(responseCode))
+                            emitter.onError(BillingException(responseCode))
                         }
                     }
 
                 })
             }.cache() }
+
+    /**
+     * A Flowable of all [PurchaseResult]s provided to us by Google Play,
+     *  INCLUDING results emitted by [launchBillingFlow].
+     */
+    fun purchaseUpdates(): Flowable<PurchaseResult> = purchaseUpdates
+
+    /**
+     * Reactive version of [BillingClient.launchBillingFlow] that emits the
+     *  the result.
+     */
+    fun launchBillingFlow(activity: Activity, params: BillingFlowParams): Single<PurchaseResult> =
+        client.flatMap { client ->
+            val lastValue = purchaseUpdates.value
+            val result = client.launchBillingFlow(activity, params)
+            if (result != BillingClient.BillingResponse.OK) {
+                Single.error(BillingException(result))
+            } else {
+                purchaseUpdates
+                    .filter { it !== lastValue }
+                    .take(1)
+                    .singleOrError()
+            }
+        }
 
     /**
      * Reactive version of [BillingClient.queryPurchases] that uses cached data
@@ -68,7 +97,7 @@ class Shoutengai @UiThread constructor(
             when {
                 result.responseCode != BillingClient.BillingResponse.OK ->
                     Flowable.error(
-                        BillingUnavailableException(result.responseCode)
+                        BillingException(result.responseCode)
                     )
 
                 result.purchasesList == null -> Flowable.empty()
@@ -95,7 +124,7 @@ class Shoutengai @UiThread constructor(
                     }
                     emitter.onComplete()
                 } else {
-                    emitter.onError(BillingUnavailableException(responseCode))
+                    emitter.onError(BillingException(responseCode))
                 }
             })
         }, BackpressureStrategy.BUFFER) }

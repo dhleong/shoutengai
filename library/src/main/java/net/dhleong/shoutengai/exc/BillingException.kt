@@ -3,6 +3,6 @@ package net.dhleong.shoutengai.exc
 /**
  * @author dhleong
  */
-class BillingUnavailableException(
+class BillingException(
     val responseCode: Int
 ) : Exception()
